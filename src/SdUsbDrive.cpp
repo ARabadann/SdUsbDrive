@@ -360,6 +360,7 @@ int32_t SdUsbDrive::_read10(uint32_t lba, uint32_t offset, void* buf,
     }
 
     _lastIoMs = millis();
+    _lastCmdMs = _lastIoMs;
 
     if (lba < _readStart || lba >= _readStart + _readCount) {
 
@@ -402,6 +403,7 @@ int32_t SdUsbDrive::_write10(uint32_t lba, uint32_t offset,
 
     const uint32_t now = millis();
     _lastIoMs = now;
+    _lastCmdMs = now;
     _lastWriteMs = now;
     _hostWrote = true;
 
@@ -477,6 +479,22 @@ bool SdUsbDrive::_syncCache() {
 // ------------------------------------------------------------------
 
 extern "C" {
+
+// The core runs the USB task once per millisecond, and the mass storage
+// class moves one 64-byte packet per run: only 64 KB/s. Running the
+// task as soon as TinyUSB queues an event lets transfers go at bus
+// speed. The task IRQ still takes USB.mutex, so nothing else changes.
+void tud_event_hook_cb(uint8_t rhport, uint32_t eventid, bool in_isr) {
+    (void) rhport;
+    (void) eventid;
+#ifndef __FREERTOS
+    if (in_isr && activeDrive) {
+        irq_set_pending(USB.usbTaskIRQ);
+    }
+#else
+    (void) in_isr;
+#endif
+}
 
 uint8_t tud_msc_get_maxlun_cb(void) {
     return 1;

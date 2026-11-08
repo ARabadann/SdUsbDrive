@@ -158,6 +158,8 @@ bool SdUsbDrive::begin(const Config& config) {
     _owner = Owner::None;
     _writeCount = 0;
     _readCount = 0;
+    _hostSawRemoval = false;
+    _removedAtMs = millis();
     unlock();
 
     _sd.end();
@@ -234,15 +236,30 @@ bool SdUsbDrive::shareWithHost(bool readOnly) {
         _fsMounted = false;
     }
 
+    // After "Eject" the host stops looking at the drive, so it would not
+    // notice the card coming back. Reconnecting USB makes it detect the
+    // drive again from scratch (USB Serial reconnects too).
+    const bool reconnect = _ejected && _usbAdded && tud_mounted();
+
     lock();
     _readOnly = readOnly;
     _readCount = 0;
     _writeCount = 0;
     _ejected = false;
     _hostWrote = false;
-    _mediaChanged = true;
+    _hostAccessed = false;
+    // A host that had the card must see it gone before it comes back.
+    // Not needed after a reconnect: the host starts with no old copy.
+    _presentPending = _hostHadMedia && !reconnect;
+    _mediaChanged = !_presentPending;
+    _hostHadMedia = true;
     _owner = Owner::Host;
     unlock();
+
+    if (reconnect) {
+        USB.disconnect();
+        USB.connect();
+    }
 
     return true;
 }
@@ -257,7 +274,8 @@ bool SdUsbDrive::takeBack(bool force) {
         return false;
     }
 
-    if (!force && !_ejected && msSinceHostWrite() < _quietMs) {
+    // Wait for any copy in progress, in either direction
+    if (!force && !_ejected && msSinceHostAccess() < _quietMs) {
         return false;
     }
 
@@ -265,6 +283,8 @@ bool SdUsbDrive::takeBack(bool force) {
     flushWrites();
     _readCount = 0;
     _owner = Owner::Sketch;
+    _hostSawRemoval = false;
+    _removedAtMs = millis();
     unlock();
 
     if (_ioError) {
@@ -278,8 +298,7 @@ bool SdUsbDrive::takeBack(bool force) {
 }
 
 bool SdUsbDrive::hostMounted() const {
-    return _owner == Owner::Host && !_ejected && !_ioError &&
-           tud_mounted() && millis() - _lastCmdMs < 3000;
+    return hostAllowed() && tud_mounted() && millis() - _lastCmdMs < 3000;
 }
 
 bool SdUsbDrive::hostActive() const {
@@ -290,12 +309,17 @@ uint32_t SdUsbDrive::msSinceHostWrite() const {
     return _hostWrote ? millis() - _lastWriteMs : UINT32_MAX;
 }
 
+uint32_t SdUsbDrive::msSinceHostAccess() const {
+    return _hostAccessed ? millis() - _lastIoMs : UINT32_MAX;
+}
+
 // ------------------------------------------------------------------
 // Host side (USB interrupt, USB.mutex held)
 // ------------------------------------------------------------------
 
 bool SdUsbDrive::hostAllowed() const {
-    return _owner == Owner::Host && !_ejected && !_ioError;
+    return _owner == Owner::Host && !_presentPending && !_ejected &&
+           !_ioError;
 }
 
 bool SdUsbDrive::flushWrites() {
@@ -324,9 +348,19 @@ void SdUsbDrive::_inquiry(uint8_t vendor[8], uint8_t product[16],
 
 bool SdUsbDrive::_testUnitReady(uint8_t lun) {
 
-    _lastCmdMs = millis();
+    const uint32_t now = millis();
+    _lastCmdMs = now;
+
+    // Hold the card back until the host has seen it gone long enough
+    if (_owner == Owner::Host && _presentPending && !_ejected &&
+            !_ioError && _hostSawRemoval &&
+            now - _removedAtMs >= MIN_REMOVAL_MS) {
+        _presentPending = false;
+        _mediaChanged = true;
+    }
 
     if (!hostAllowed()) {
+        _hostSawRemoval = true;
         tud_msc_set_sense(lun, SENSE_NOT_READY, ASC_MEDIUM_NOT_PRESENT, 0);
         return false;
     }
@@ -361,6 +395,7 @@ int32_t SdUsbDrive::_read10(uint32_t lba, uint32_t offset, void* buf,
 
     _lastIoMs = millis();
     _lastCmdMs = _lastIoMs;
+    _hostAccessed = true;
 
     if (lba < _readStart || lba >= _readStart + _readCount) {
 
@@ -406,6 +441,7 @@ int32_t SdUsbDrive::_write10(uint32_t lba, uint32_t offset,
     _lastCmdMs = now;
     _lastWriteMs = now;
     _hostWrote = true;
+    _hostAccessed = true;
 
     if (offset == 0) {
 

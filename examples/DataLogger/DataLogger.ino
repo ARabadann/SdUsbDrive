@@ -1,16 +1,21 @@
 /*
-    DataLogger - log to the card while the computer can see it
+    DataLogger - the computer always sees the drive; the board writes
+    only when you ask
 
-    Every 10 seconds the sketch takes the card back, appends a line to
-    LOG.CSV and lends the card to the computer again. The computer sees
-    the file grow without unplugging the board.
+    The board measures its own chip temperature every second and keeps
+    the readings in RAM. The microSD card stays visible on the computer
+    the whole time. The readings are saved to LOG.CSV when:
 
-    takeBack() refuses while the computer is writing (for example in
-    the middle of a copy), so the sketch simply tries again a second
-    later. Nothing is cut in half.
+      1. you EJECT the drive on the computer ("Eject" / "Safely
+         remove"): that tells the board the card is free. It saves at
+         once and the drive shows up again a moment later with the new
+         lines (USB Serial reconnects too), or
+      2. you type  s  in the Serial Monitor (115200): the board waits
+         until the computer is not copying anything, then saves. The
+         drive disappears for 1-2 s and comes back, or
+      3. the RAM buffer gets full (10 minutes), the same way as 2.
 
-    The computer briefly sees "no media" while the sketch writes. Open
-    LOG.CSV again after it changes to see the new lines.
+    A copy in progress is never cut: the board waits for it to finish.
 
     Boards with SDIO pins (like the UNIT Pulsar RP2350A) use SDIO; other
     boards use SPI: set SD_CS_PIN below.
@@ -18,9 +23,9 @@
 
 #include <SdUsbDrive.h>
 
-const uint8_t SD_CS_PIN = 17;          // only used without SDIO pins
-const uint32_t LOG_EVERY_MS = 10000;
-const uint32_t RETRY_MS = 1000;
+const uint8_t SD_CS_PIN = 17;           // only used without SDIO pins
+const uint32_t SAMPLE_EVERY_MS = 1000;
+const size_t MAX_SAMPLES = 600;         // 10 minutes in RAM
 
 SdUsbDrive drive;
 
@@ -32,58 +37,127 @@ SdUsbDrive::Config cardConfig() {
 #endif
 }
 
-uint32_t nextLogMs = 0;
-uint32_t lineNumber = 0;
+struct Sample {
+    uint32_t seconds;
+    float celsius;
+};
 
-bool appendLine() {
+Sample samples[MAX_SAMPLES];
+size_t sampleCount = 0;
+uint32_t nextSampleMs = 0;
+bool saveRequested = false;
+bool waitingMessageShown = false;
 
-    // The sketch owns the card here: use fs() like any SdFat volume
+void takeSample() {
+
+    if ((int32_t) (millis() - nextSampleMs) < 0) {
+        return;
+    }
+
+    nextSampleMs += SAMPLE_EVERY_MS;
+
+    if (sampleCount < MAX_SAMPLES) {
+        samples[sampleCount++] = { millis() / 1000, analogReadTemp() };
+    }
+
+    if (sampleCount >= MAX_SAMPLES - 10 && !saveRequested) {
+        Serial.println("RAM almost full, saving");
+        saveRequested = true;
+    }
+}
+
+// The sketch owns the card here: use fs() like any SdFat volume
+bool writeSamples() {
+
     FsFile f = drive.fs().open("LOG.CSV", O_WRONLY | O_CREAT | O_APPEND);
     if (!f) {
         return false;
     }
 
     if (f.size() == 0) {
-        f.println("line,uptime_s");
+        f.println("uptime_s,chip_temp_c");
     }
 
-    f.printf("%lu,%lu\n", (unsigned long) ++lineNumber,
-             (unsigned long) (millis() / 1000));
+    for (size_t i = 0; i < sampleCount; i++) {
+        f.printf("%lu,%.1f\n", (unsigned long) samples[i].seconds,
+                 samples[i].celsius);
+    }
+
     f.close();   // always close before shareWithHost()
     return true;
+}
+
+void trySave() {
+
+    // Ejected: the card is free, takeBack() succeeds at once.
+    // Otherwise it refuses while the computer is copying.
+    if (!drive.takeBack()) {
+        if (!waitingMessageShown) {
+            Serial.println("Computer is using the drive, waiting...");
+            waitingMessageShown = true;
+        }
+        return;
+    }
+
+    const size_t saved = sampleCount;
+    const bool ok = writeSamples();
+
+    if (ok) {
+        sampleCount = 0;
+    }
+
+    drive.shareWithHost();
+    saveRequested = false;
+    waitingMessageShown = false;
+
+    Serial.printf(ok ? "Saved %u readings to LOG.CSV\n"
+                     : "Could not open LOG.CSV (%u readings kept)\n",
+                  (unsigned) saved);
+}
+
+void readCommands() {
+
+    while (Serial.available()) {
+        const char c = Serial.read();
+        if (c == 's' || c == 'S') {
+            Serial.println("Save requested");
+            saveRequested = true;
+        }
+    }
 }
 
 void setup() {
 
     drive.setIdentity("SdUsb", "Data Logger");
     const bool cardOk = drive.begin(cardConfig());
+    drive.shareWithHost();
 
     Serial.begin(115200);
+    nextSampleMs = millis();
 
     if (!cardOk) {
         Serial.println("No card. Insert one and reset the board.");
-        return;
     }
-
-    appendLine();
-    drive.shareWithHost();
-    nextLogMs = millis() + LOG_EVERY_MS;
 }
 
 void loop() {
 
-    if (!drive.cardPresent() || (int32_t) (millis() - nextLogMs) < 0) {
+    takeSample();
+    readCommands();
+
+    if (!drive.cardPresent()) {
         return;
     }
 
-    if (!drive.takeBack()) {
-        Serial.println("Computer is writing, trying again in 1 s");
-        nextLogMs = millis() + RETRY_MS;
-        return;
+    // Ejecting the drive on the computer counts as "save now"
+    if (drive.hostEjected() || saveRequested) {
+        trySave();
     }
 
-    Serial.println(appendLine() ? "Logged a line" : "Could not open LOG.CSV");
-
-    drive.shareWithHost();
-    nextLogMs = millis() + LOG_EVERY_MS;
+    static uint32_t lastStatus = 0;
+    if (millis() - lastStatus > 10000) {
+        lastStatus = millis();
+        Serial.printf("%u readings in RAM. Type s or eject the drive "
+                      "to save.\n", (unsigned) sampleCount);
+    }
 }

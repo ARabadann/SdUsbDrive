@@ -67,13 +67,18 @@ public:
     void setQuietTime(uint32_t ms);
 
     // Lends the card to the host. Close every file first. With
-    // readOnly the host can copy files but not change them. The host
-    // is told that the media changed, so it shows the new files.
+    // readOnly the host can copy files but not change them. If the
+    // host had the card before, it first has to notice the card was
+    // gone, so the drive reappears 1-2 s later and the host reads the
+    // file system again instead of trusting its old copy. If the host
+    // ejected the drive, USB reconnects (about 1 s) so the drive shows
+    // up again; USB Serial reconnects with it.
     bool shareWithHost(bool readOnly = false);
 
     // Takes the card back for the sketch and mounts the file system.
-    // Refuses while the host wrote during the last quiet time (2 s by
-    // default), so a copy is not cut in half, unless force is true.
+    // Refuses while the host read or wrote during the last quiet time
+    // (2 s by default), so a copy in either direction is not cut in
+    // half, unless force is true. Status polls do not count as use.
     // Returns true when fs() is ready to use.
     bool takeBack(bool force = false);
 
@@ -93,11 +98,16 @@ public:
     // The host read or wrote during the last 250 ms.
     bool hostActive() const;
 
-    // The host used "Eject" / "Safely remove". Cleared by shareWithHost().
+    // The host used "Eject" / "Safely remove": the card is free and
+    // takeBack() succeeds at once. Cleared by shareWithHost().
     bool hostEjected() const { return _ejected; }
 
     // Milliseconds since the host last wrote (UINT32_MAX if never).
     uint32_t msSinceHostWrite() const;
+
+    // Milliseconds since the host last read or wrote (UINT32_MAX if
+    // never since the card was shared).
+    uint32_t msSinceHostAccess() const;
 
     uint64_t bytesRead() const { return uint64_t(_sectorsRead) * 512; }
     uint64_t bytesWritten() const { return uint64_t(_sectorsWritten) * 512; }
@@ -140,6 +150,17 @@ private:
     volatile bool _mediaChanged = false;
     volatile bool _ioError = false;
     volatile bool _hostLocked = false;
+
+    // After the sketch used the card, the host must notice it was gone
+    // (answer "no media" at least once, for at least MIN_REMOVAL_MS)
+    // before the card comes back. Otherwise a host that polled too late
+    // keeps its old copy of the file system and can overwrite the
+    // sketch's changes.
+    static constexpr uint32_t MIN_REMOVAL_MS = 1000;
+    volatile bool _hostHadMedia = false;
+    volatile bool _presentPending = false;
+    volatile bool _hostSawRemoval = false;
+    volatile uint32_t _removedAtMs = 0;
     bool _fsMounted = false;
     bool _usbAdded = false;
 
@@ -150,6 +171,7 @@ private:
     volatile uint32_t _lastIoMs = 0;
     volatile uint32_t _lastWriteMs = 0;
     volatile bool _hostWrote = false;
+    volatile bool _hostAccessed = false;
     volatile uint32_t _sectorsRead = 0;
     volatile uint32_t _sectorsWritten = 0;
 

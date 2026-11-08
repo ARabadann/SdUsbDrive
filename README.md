@@ -58,7 +58,7 @@ void loop() {
 | `SdUsbDrive::sdio(clk, cmd, dat0)` | SDIO card configuration (DAT1..DAT3 on the next pins). |
 | `SdUsbDrive::spi(cs, port = SPI, maxSck = SD_SCK_MHZ(25))` | SPI card configuration. |
 | `shareWithHost(readOnly = false)` | Lends the card to the computer. Close every file first. |
-| `takeBack(force = false)` | Takes the card back and mounts the file system. Refuses if the computer wrote during the quiet time (2 s). Returns true when `fs()` is ready. |
+| `takeBack(force = false)` | Takes the card back and mounts the file system. Refuses if the computer read or wrote during the quiet time (2 s), so copies are never cut. Returns true when `fs()` is ready. |
 | `fs()` | The `SdFs` file system (`FsFile`, `open`, `exists`, `remove`, `mkdir`…). Use it only while the sketch owns the card. |
 | `owner()` | `Owner::Sketch`, `Owner::Host` or `Owner::None`. |
 | `cardPresent()` | A card started and had no I/O error since. |
@@ -66,7 +66,7 @@ void loop() {
 | `hostActive()` | The computer read or wrote in the last 250 ms (activity LED). |
 | `hostEjected()` | The computer used Eject / Safely Remove. |
 | `onEject(callback)` | Called from the USB interrupt on eject. Keep it short. |
-| `msSinceHostWrite()` | Time since the computer last wrote. |
+| `msSinceHostWrite()` / `msSinceHostAccess()` | Time since the computer last wrote / read or wrote. |
 | `bytesRead()` / `bytesWritten()` | Transfer counters. |
 | `setIdentity(vendor, product, rev)` | Name shown by the computer (8 / 16 / 4 chars). |
 | `setQuietTime(ms)` | Quiet time used by `takeBack()`. |
@@ -82,8 +82,15 @@ void loop() {
   away. macOS and Linux may keep writes in memory for several seconds:
   eject the drive, or raise `setQuietTime()`, before the sketch takes
   the card back.
-- **After Eject**, some computers only show the drive again after the
-  cable is plugged in again.
+- **Take the card only when needed.** While the sketch owns the card
+  the computer sees no media: open Explorer windows on the drive close
+  and files played from it stop. Keep data in RAM and write it on a
+  user action (a button, a command) or in rare batches, not every few
+  seconds.
+- **Eject as "go ahead".** When the user ejects the drive the card is
+  free and `takeBack()` succeeds at once. The next `shareWithHost()`
+  reconnects USB (about 1 s) so the drive shows up again; USB Serial
+  reconnects with it.
 - **Speed.** RP2040/RP2350 USB is Full Speed (12 Mbit/s), about
   0.8-1 MB/s in practice.
 - **SPI bus.** The computer reaches the card from the USB interrupt, so
@@ -95,8 +102,9 @@ void loop() {
 
 - **CardReader** - the board becomes a USB card reader with an activity
   LED and speed report.
-- **DataLogger** - appends a line every 10 s while the computer keeps
-  the drive open.
+- **DataLogger** - the drive stays visible; readings are kept in RAM
+  and saved to LOG.CSV when you eject the drive or type `s` in the
+  Serial Monitor.
 - **CardReaderSPI** - card reader with a microSD module on SPI.
 
 ## License

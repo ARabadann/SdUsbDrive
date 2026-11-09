@@ -109,4 +109,4 @@ void loop() {
 
 ## License
 
-MIT. Copyright (c) 2026 ARabadann.
+MIT. Copyright (c) 2026 Adrián Rabadán Ortiz.

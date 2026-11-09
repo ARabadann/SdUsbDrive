@@ -1,6 +1,6 @@
 /*
     SdUsbDrive - Share a microSD card with a computer as a USB drive
-    Copyright (c) 2026 ARabadann
+    Copyright (c) 2026 Adrián Rabadán Ortiz
 
     Released under the MIT License. See LICENSE for details.
 */

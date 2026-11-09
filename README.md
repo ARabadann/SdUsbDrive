@@ -18,7 +18,8 @@ For the Raspberry Pi RP2040 / RP2350 Arduino core
 - **Safe hand-off.** `takeBack()` refuses while the computer is in the
   middle of writing, unless you force it.
 - **Media change.** The computer is told the card changed, so it reads
-  the file system again (Windows, macOS, Linux, Android).
+  the file system again. Tested on Windows 11; macOS, Linux and
+  Android are not tested yet (reports welcome).
 - **SDIO and SPI cards.** 4-bit SDIO on boards that have it (UNIT Pulsar
   RP2350A), SPI on everything else.
 - **FAT16, FAT32 and exFAT**, through the bundled SdFat library.
